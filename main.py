@@ -204,6 +204,7 @@ class OrganizzerApp(ctk.CTk):
         self._load_prefs()
         self._build()
         self._refresh()
+        self._snapshot()
         self._status("Informe seguradora, planilha e pasta de origem.")
         self.bind("<Control-Return>", lambda _e: self._cut_next())
         self._poll()
@@ -478,6 +479,7 @@ class OrganizzerApp(ctk.CTk):
         )
         if d:
             self.source_var.set(d)
+            self._clear()
             self._snapshot()
             self._save_prefs()
 
@@ -511,11 +513,15 @@ class OrganizzerApp(ctk.CTk):
 
     def _poll(self, force_now: bool = False):
         scanned = self._scan()
-        current_paths = {str(e.resolve()) for _, _, e in scanned}
+        current_map = {str(e.resolve()): (mtime, size) for mtime, size, e in scanned}
 
+        # Limpa da lista o que saiu da pasta de origem e sincroniza self.known
         for f in list(self.files):
-            if f["path"] not in current_paths or not Path(f["path"]).exists():
+            if f["path"] not in current_map or not Path(f["path"]).exists():
                 self._drop(f)
+        for known_path in list(self.known.keys()):
+            if known_path not in current_map:
+                self.known.pop(known_path, None)
         self._after_change()
 
         have = {f["path"] for f in self.files}
@@ -524,11 +530,20 @@ class OrganizzerApp(ctk.CTk):
             if p in have:
                 continue
 
+            # Se já estava no snapshot inicial com exatamente o mesmo (mtime, size), ignora
+            known_sig = self.known.get(p)
+            if known_sig == sig:
+                continue
+
+            # Se o arquivo ainda está mudando de tamanho e não é atualização forçada, aguarda estabilizar
             prev_pending = self.pending.get(p)
-            if not force_now and prev_pending != sig and prev_pending is not None:
-                if prev_pending[1] != size:
-                    self.pending[p] = sig
-                    continue
+            if not force_now and prev_pending is not None and prev_pending[1] != size:
+                self.pending[p] = sig
+                continue
+            if not force_now and prev_pending is None and known_sig is None:
+                # Primeira vez que vemos um arquivo novo: se o tamanho já é > 0, pode registrar ou aguardar 1 ciclo
+                self.pending[p] = sig
+                continue
 
             self.pending.pop(p, None)
             self.known[p] = sig
