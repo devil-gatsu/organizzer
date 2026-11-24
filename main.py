@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import openpyxl
 
-APP_NAME = "organizzer"
+APP_NAME = "Organizzer"
 STATE_FILE = Path.home() / ".organizzer_state.json"
 TEMP_EXTS = {".tmp", ".crdownload", ".part", ".download"}
 IGNORED = {"desktop.ini", "thumbs.db"}
@@ -50,6 +50,7 @@ def size_str(n: float) -> str:
         if n < 1024 or u == "GB":
             return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
         n /= 1024
+    return ""
 
 
 def read_renovacao_rows(xl_path: Path):
@@ -94,7 +95,6 @@ def read_renovacao_rows(xl_path: Path):
                         rows_out.append((c_val, d_val))
             return rows_out
         except ImportError:
-            # Fallback leve lendo content.xml do .ods sem dependências extras
             ns = {
                 "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
                 "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
@@ -117,9 +117,7 @@ def read_renovacao_rows(xl_path: Path):
                 cells = []
                 for tc in tr.findall("table:table-cell", ns):
                     c_rep = int(tc.attrib.get(f"{{{ns['table']}}}number-columns-repeated") or 1)
-                    parts = []
-                    for p in tc.findall(".//text:p", ns):
-                        parts.append("".join(p.itertext()))
+                    parts = ["".join(p.itertext()) for p in tc.findall(".//text:p", ns)]
                     txt = " ".join(parts).strip()
                     for _ in range(min(c_rep, 20)):
                         cells.append(txt)
@@ -155,7 +153,8 @@ def btn(parent, text, cmd, w=70, h=26, kind="soft", **kw):
         ),
         "link": dict(fg_color="transparent", hover_color=SUBTLE, text_color=BLUE),
         "primary": dict(fg_color=BLUE, hover_color=BLUE_DK, text_color="#FFFFFF"),
-    }[kind]
+    }[kind].copy()
+    styles.update(kw)
     return ctk.CTkButton(
         parent,
         text=text,
@@ -165,7 +164,6 @@ def btn(parent, text, cmd, w=70, h=26, kind="soft", **kw):
         corner_radius=8,
         font=F(11, "bold"),
         **styles,
-        **kw,
     )
 
 
@@ -206,7 +204,6 @@ class OrganizzerApp(ctk.CTk):
             except Exception:
                 pass
 
-    # ── prefs ──────────────────────────────────────────────────────────────
     def _load_prefs(self):
         try:
             d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -234,7 +231,6 @@ class OrganizzerApp(ctk.CTk):
         except Exception:
             pass
 
-    # ── interface ──────────────────────────────────────────────────────────
     def _card(self, parent):
         return ctk.CTkFrame(
             parent, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE_SOFT
@@ -352,8 +348,12 @@ class OrganizzerApp(ctk.CTk):
         fh.grid_columnconfigure(0, weight=1)
         self.files_title = ctk.CTkLabel(fh, text="ARQUIVOS", font=F(10, "bold"), text_color=MUTED)
         self.files_title.grid(row=0, column=0, sticky="w")
-        btn(fh, "↻", lambda: self._poll(force_now=True), w=28, h=20, kind="link").grid(row=0, column=1)
-        btn(fh, "Todos", lambda: self._check_all(True), w=44, h=20, kind="link").grid(row=0, column=2)
+        btn(fh, "↻", lambda: self._poll(force_now=True), w=28, h=20, kind="link").grid(
+            row=0, column=1
+        )
+        btn(fh, "Todos", lambda: self._check_all(True), w=44, h=20, kind="link").grid(
+            row=0, column=2
+        )
         btn(fh, "Nenhum", lambda: self._check_all(False), w=50, h=20, kind="link").grid(
             row=0, column=3
         )
@@ -442,8 +442,7 @@ class OrganizzerApp(ctk.CTk):
             self._snapshot()
             self._save_prefs()
 
-    # ── monitoramento da pasta ─────────────────────────────────────────────
-def _scan(self):
+    def _scan(self):
         src = Path(self.source_var.get().strip())
         out = []
         if not src.is_dir():
@@ -502,7 +501,6 @@ def _scan(self):
         if not force_now:
             self.after(1000, self._poll)
 
-    # ── lista de arquivos ──────────────────────────────────────────────────
     def _add_row(self, info):
         self.empty.pack_forget()
         row = ctk.CTkFrame(
@@ -563,7 +561,10 @@ def _scan(self):
 
     def _after_change(self):
         if not self.files:
-            self.empty.pack(pady=24)
+            if not self.empty.winfo_manager():
+                self.empty.pack(pady=24)
+        else:
+            self.empty.pack_forget()
         self._count()
 
     def _count(self):
@@ -571,7 +572,6 @@ def _scan(self):
         m = sum(1 for f in self.files if f["var"].get())
         self.files_title.configure(text=f"ARQUIVOS  {m}/{n}" if n else "ARQUIVOS")
 
-    # ── fila ───────────────────────────────────────────────────────────────
     def _start(self):
         insurer = clean(self.insurer_var.get())
         xl = Path(self.excel_var.get().strip())
