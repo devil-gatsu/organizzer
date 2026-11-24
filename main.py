@@ -475,7 +475,6 @@ def _scan(self):
         scanned = self._scan()
         current_paths = {str(e.resolve()) for _, _, e in scanned}
 
-        # Remove da lista arquivos que não existem mais na pasta de origem
         for f in list(self.files):
             if f["path"] not in current_paths or not Path(f["path"]).exists():
                 self._drop(f)
@@ -487,10 +486,8 @@ def _scan(self):
             if p in have:
                 continue
 
-            # Se já estava pendente com a mesma assinatura ou se for atualização forçada, adiciona
             prev_pending = self.pending.get(p)
             if not force_now and prev_pending != sig and prev_pending is not None:
-                # Se ainda está crescendo, atualiza pendente e aguarda próximo ciclo
                 if prev_pending[1] != size:
                     self.pending[p] = sig
                     continue
