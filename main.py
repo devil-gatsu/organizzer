@@ -9,6 +9,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 import openpyxl
+import sys
+
+
+def resource_path(relative_path: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative_path
 
 APP_NAME = "organizzer"
 STATE_FILE = Path.home() / ".organizzer_state.json"
