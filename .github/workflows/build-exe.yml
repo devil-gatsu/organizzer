@@ -30,7 +30,7 @@ jobs:
 
       - name: Build single-file EXE with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "organizzer" main.py
+          pyinstaller --noconfirm --onefile --windowed --icon "assets/icon.ico" --name "organizzer" main.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
