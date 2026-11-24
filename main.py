@@ -3,6 +3,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -22,6 +25,11 @@ DARK, MUTED, FAINT = "#0F172A", "#64748B", "#94A3B8"
 GREEN, AMBER, RED = "#16A34A", "#D97706", "#DC2626"
 STATUS = {"info": BLUE_LT, "ok": GREEN, "warn": AMBER, "error": RED}
 FAMILY = "Segoe UI"
+
+
+def resource_path(rel: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / rel
 
 
 def F(size=11, weight="normal"):
@@ -44,16 +52,120 @@ def size_str(n: float) -> str:
         n /= 1024
 
 
+def read_renovacao_rows(xl_path: Path):
+    """Retorna (locador, inquilino) da aba 'RENOVAÇÃO', colunas C e D, a partir da linha 2."""
+    suffix = xl_path.suffix.lower()
+
+    if suffix == ".ods":
+        try:
+            from odf.opendocument import load as odf_load
+            from odf.table import Table, TableCell, TableRow
+            from odf.text import P
+
+            doc = odf_load(str(xl_path))
+            target_table = None
+            for tbl in doc.getElementsByType(Table):
+                if (tbl.getAttribute("name") or "").strip().upper() == "RENOVAÇÃO":
+                    target_table = tbl
+                    break
+            if target_table is None:
+                raise KeyError("Aba 'RENOVAÇÃO' não encontrada no arquivo .ods.")
+
+            rows_out = []
+            row_idx = 0
+            for tr in target_table.getElementsByType(TableRow):
+                row_repeat = int(tr.getAttribute("numberrowsrepeated") or 1)
+                cells = []
+                for tc in tr.getElementsByType(TableCell):
+                    col_repeat = int(tc.getAttribute("numbercolumnsrepeated") or 1)
+                    txt = "".join(
+                        "".join(node.data for node in p.childNodes if hasattr(node, "data"))
+                        for p in tc.getElementsByType(P)
+                    ).strip()
+                    for _ in range(min(col_repeat, 20)):
+                        cells.append(txt)
+                    if len(cells) >= 4:
+                        break
+                for _ in range(min(row_repeat, 5000)):
+                    row_idx += 1
+                    if row_idx >= 2:
+                        c_val = cells[2] if len(cells) > 2 else ""
+                        d_val = cells[3] if len(cells) > 3 else ""
+                        rows_out.append((c_val, d_val))
+            return rows_out
+        except ImportError:
+            # Fallback leve lendo content.xml do .ods sem dependências extras
+            ns = {
+                "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+                "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+            }
+            with zipfile.ZipFile(xl_path, "r") as zf:
+                xml_bytes = zf.read("content.xml")
+            root = ET.fromstring(xml_bytes)
+            target_tbl = None
+            for tbl in root.findall(".//table:table", ns):
+                if (tbl.attrib.get(f"{{{ns['table']}}}name") or "").strip().upper() == "RENOVAÇÃO":
+                    target_tbl = tbl
+                    break
+            if target_tbl is None:
+                raise KeyError("Aba 'RENOVAÇÃO' não encontrada no arquivo .ods.")
+
+            rows_out = []
+            row_idx = 0
+            for tr in target_tbl.findall("table:table-row", ns):
+                r_rep = int(tr.attrib.get(f"{{{ns['table']}}}number-rows-repeated") or 1)
+                cells = []
+                for tc in tr.findall("table:table-cell", ns):
+                    c_rep = int(tc.attrib.get(f"{{{ns['table']}}}number-columns-repeated") or 1)
+                    parts = []
+                    for p in tc.findall(".//text:p", ns):
+                        parts.append("".join(p.itertext()))
+                    txt = " ".join(parts).strip()
+                    for _ in range(min(c_rep, 20)):
+                        cells.append(txt)
+                    if len(cells) >= 4:
+                        break
+                for _ in range(min(r_rep, 5000)):
+                    row_idx += 1
+                    if row_idx >= 2:
+                        c_val = cells[2] if len(cells) > 2 else ""
+                        d_val = cells[3] if len(cells) > 3 else ""
+                        rows_out.append((c_val, d_val))
+            return rows_out
+
+    wb = openpyxl.load_workbook(xl_path, data_only=True, read_only=True)
+    try:
+        sheet_name = next((s for s in wb.sheetnames if s.strip().upper() == "RENOVAÇÃO"), None)
+        if not sheet_name:
+            raise KeyError("Aba 'RENOVAÇÃO' não encontrada na planilha.")
+        ws = wb[sheet_name]
+        return [
+            (row[0] if len(row) > 0 else "", row[1] if len(row) > 1 else "")
+            for row in ws.iter_rows(min_row=2, min_col=3, max_col=4, values_only=True)
+        ]
+    finally:
+        wb.close()
+
+
 def btn(parent, text, cmd, w=70, h=26, kind="soft", **kw):
     styles = {
         "soft": dict(fg_color=SUBTLE, hover_color=LINE, text_color=BLUE),
-        "ghost": dict(fg_color=CARD, hover_color=LINE, text_color=BLUE, border_width=1, border_color=LINE),
+        "ghost": dict(
+            fg_color=CARD, hover_color=LINE, text_color=BLUE, border_width=1, border_color=LINE
+        ),
         "link": dict(fg_color="transparent", hover_color=SUBTLE, text_color=BLUE),
         "primary": dict(fg_color=BLUE, hover_color=BLUE_DK, text_color="#FFFFFF"),
     }[kind]
     return ctk.CTkButton(
-        parent, text=text, command=cmd, width=w, height=h, corner_radius=8,
-        font=F(11, "bold"), **styles, **kw,
+        parent,
+        text=text,
+        command=cmd,
+        width=w,
+        height=h,
+        corner_radius=8,
+        font=F(11, "bold"),
+        **styles,
+        **kw,
     )
 
 
@@ -74,7 +186,7 @@ class OrganizzerApp(ctk.CTk):
         self.idx = 0
         self.running = False
         self.cfg_open = True
-        self.known = {}  # path -> (mtime, size)
+        self.known = {}
         self.pending = {}
         self.files = []
 
@@ -84,6 +196,15 @@ class OrganizzerApp(ctk.CTk):
         self._status("Informe seguradora, planilha e pasta de origem.")
         self.bind("<Control-Return>", lambda _e: self._cut_next())
         self._poll()
+        self.after(200, self._apply_icon)
+
+    def _apply_icon(self):
+        ico = resource_path("assets/icon.ico")
+        if ico.is_file():
+            try:
+                self.iconbitmap(str(ico))
+            except Exception:
+                pass
 
     # ── prefs ──────────────────────────────────────────────────────────────
     def _load_prefs(self):
@@ -115,35 +236,45 @@ class OrganizzerApp(ctk.CTk):
 
     # ── interface ──────────────────────────────────────────────────────────
     def _card(self, parent):
-        return ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE_SOFT)
+        return ctk.CTkFrame(
+            parent, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE_SOFT
+        )
 
     def _entry(self, parent, var, ph):
         return ctk.CTkEntry(
-            parent, textvariable=var, placeholder_text=ph, height=28, corner_radius=8,
-            fg_color=BG, border_color=LINE, text_color=DARK, placeholder_text_color=FAINT, font=F(11),
+            parent,
+            textvariable=var,
+            placeholder_text=ph,
+            height=28,
+            corner_radius=8,
+            fg_color=BG,
+            border_color=LINE,
+            text_color=DARK,
+            placeholder_text_color=FAINT,
+            font=F(11),
         )
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
-        # cabeçalho enxuto
         head = self._card(self)
         head.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
         head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(head, text=APP_NAME, font=F(15, "bold"), text_color=DARK).grid(
             row=0, column=0, padx=12, pady=(6, 0), sticky="w"
         )
-        ctk.CTkLabel(head, text="Pastas de renovação • Quiver", font=F(10), text_color=MUTED).grid(
-            row=1, column=0, padx=12, sticky="w"
-        )
+        ctk.CTkLabel(
+            head, text="Pastas de renovação • Quiver", font=F(10), text_color=MUTED
+        ).grid(row=1, column=0, padx=12, sticky="w")
         self.counter = ctk.CTkLabel(head, text="0 / 0", font=F(12, "bold"), text_color=BLUE)
         self.counter.grid(row=0, column=1, rowspan=2, padx=12)
-        self.bar = ctk.CTkProgressBar(head, height=4, corner_radius=99, fg_color=SUBTLE, progress_color=BLUE)
+        self.bar = ctk.CTkProgressBar(
+            head, height=4, corner_radius=99, fg_color=SUBTLE, progress_color=BLUE
+        )
         self.bar.grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 8), sticky="ew")
         self.bar.set(0)
 
-        # configuração
         self.cfg = self._card(self)
         self.cfg.grid(row=1, column=0, padx=10, pady=(0, 6), sticky="ew")
         self.cfg.grid_columnconfigure(0, weight=1)
@@ -162,7 +293,7 @@ class OrganizzerApp(ctk.CTk):
         self.body.grid_columnconfigure(1, weight=1)
         rows = [
             ("Seguradora", self.insurer_var, "Ex.: PORTO SEGURO GERAIS", None),
-            ("Planilha", self.excel_var, "Aba RENOVAÇÃO (.xlsx)", self._pick_excel),
+            ("Planilha", self.excel_var, "Aba RENOVAÇÃO (.xlsx, .xlsm, .ods)", self._pick_excel),
             ("Origem", self.source_var, "Pasta de downloads do Quiver", self._pick_source),
         ]
         for r, (lab, var, ph, cmd) in enumerate(rows):
@@ -170,7 +301,12 @@ class OrganizzerApp(ctk.CTk):
                 row=r, column=0, padx=(0, 8), pady=2, sticky="w"
             )
             self._entry(self.body, var, ph).grid(
-                row=r, column=1, columnspan=1 if cmd else 2, padx=(0, 6) if cmd else 0, pady=2, sticky="ew"
+                row=r,
+                column=1,
+                columnspan=1 if cmd else 2,
+                padx=(0, 6) if cmd else 0,
+                pady=2,
+                sticky="ew",
             )
             if cmd:
                 btn(self.body, "...", cmd, w=34, h=28).grid(row=r, column=2, pady=2)
@@ -178,7 +314,6 @@ class OrganizzerApp(ctk.CTk):
             row=3, column=0, columnspan=3, pady=(6, 0), sticky="ew"
         )
 
-        # área de trabalho
         work = self._card(self)
         work.grid(row=2, column=0, padx=10, pady=(0, 4), sticky="nsew")
         work.grid_columnconfigure(0, weight=1)
@@ -191,8 +326,13 @@ class OrganizzerApp(ctk.CTk):
             row=0, column=0, padx=10, pady=(5, 0), sticky="w"
         )
         self.cur_label = ctk.CTkLabel(
-            ban, text="Nenhum lote iniciado", font=F(12, "bold"), text_color=DARK,
-            anchor="w", justify="left", wraplength=280,
+            ban,
+            text="Nenhum lote iniciado",
+            font=F(12, "bold"),
+            text_color=DARK,
+            anchor="w",
+            justify="left",
+            wraplength=280,
         )
         self.cur_label.grid(row=1, column=0, padx=10, sticky="w")
         self.next_label = ctk.CTkLabel(ban, text="", font=F(10), text_color=MUTED, anchor="w")
@@ -203,7 +343,9 @@ class OrganizzerApp(ctk.CTk):
         self.copy_btn.pack(pady=(0, 3))
         self.open_btn = btn(bb, "Abrir", self._open_folder, w=56, h=24, kind="ghost")
         self.open_btn.pack()
-        ban.bind("<Configure>", lambda e: self.cur_label.configure(wraplength=max(150, e.width - 100)))
+        ban.bind(
+            "<Configure>", lambda e: self.cur_label.configure(wraplength=max(150, e.width - 100))
+        )
 
         fh = ctk.CTkFrame(work, fg_color="transparent")
         fh.grid(row=1, column=0, padx=10, sticky="ew")
@@ -211,7 +353,9 @@ class OrganizzerApp(ctk.CTk):
         self.files_title = ctk.CTkLabel(fh, text="ARQUIVOS", font=F(10, "bold"), text_color=MUTED)
         self.files_title.grid(row=0, column=0, sticky="w")
         btn(fh, "Todos", lambda: self._check_all(True), w=44, h=20, kind="link").grid(row=0, column=1)
-        btn(fh, "Nenhum", lambda: self._check_all(False), w=50, h=20, kind="link").grid(row=0, column=2)
+        btn(fh, "Nenhum", lambda: self._check_all(False), w=50, h=20, kind="link").grid(
+            row=0, column=2
+        )
         btn(fh, "Limpar", self._clear, w=46, h=20, kind="link").grid(row=0, column=3)
 
         self.scroll = ctk.CTkScrollableFrame(
@@ -220,7 +364,10 @@ class OrganizzerApp(ctk.CTk):
         self.scroll.grid(row=2, column=0, padx=8, pady=(2, 6), sticky="nsew")
         self.scroll.grid_columnconfigure(0, weight=1)
         self.empty = ctk.CTkLabel(
-            self.scroll, text="Aguardando arquivos na pasta de origem...", font=F(11), text_color=FAINT
+            self.scroll,
+            text="Aguardando arquivos na pasta de origem...",
+            font=F(11),
+            text_color=FAINT,
         )
         self.empty.pack(pady=24)
 
@@ -240,12 +387,21 @@ class OrganizzerApp(ctk.CTk):
         self.dot = ctk.CTkLabel(st, text="●", font=F(9), text_color=BLUE_LT, width=12)
         self.dot.pack(side="left")
         self.status_lbl = ctk.CTkLabel(
-            st, text="", font=F(10), text_color=MUTED, anchor="w", justify="left", wraplength=420
+            st,
+            text="",
+            font=F(10),
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=420,
         )
         self.status_lbl.pack(side="left", padx=4, fill="x", expand=True)
 
         ctk.CTkLabel(
-            self, text="Criado por Matheus Carvalho • Totumseg", font=F(9), text_color=FAINT
+            self,
+            text="Criado por Matheus Carvalho • Direitos reservados à Totumseg",
+            font=F(9),
+            text_color=FAINT,
         ).grid(row=3, column=0, pady=(0, 4))
 
     def _status(self, text, kind="info"):
@@ -267,13 +423,19 @@ class OrganizzerApp(ctk.CTk):
         self.cfg_open = not self.cfg_open
 
     def _pick_excel(self):
-        p = filedialog.askopenfilename(title="Planilha de renovação", filetypes=[("Excel", "*.xlsx *.xlsm")])
+        p = filedialog.askopenfilename(
+            title="Planilha de renovação",
+            filetypes=[("Planilhas (Excel / LibreOffice)", "*.xlsx *.xlsm *.ods")],
+        )
         if p:
             self.excel_var.set(p)
 
     def _pick_source(self):
         cur = self.source_var.get().strip()
-        d = filedialog.askdirectory(title="Pasta de downloads", initialdir=cur if os.path.isdir(cur) else str(Path.home()))
+        d = filedialog.askdirectory(
+            title="Pasta de downloads",
+            initialdir=cur if os.path.isdir(cur) else str(Path.home()),
+        )
         if d:
             self.source_var.set(d)
             self._snapshot()
@@ -313,7 +475,7 @@ class OrganizzerApp(ctk.CTk):
             p, sig = str(e.resolve()), (mtime, size)
             if self.known.get(p) == sig:
                 continue
-            if self.pending.get(p) != sig:  # espera o download estabilizar
+            if self.pending.get(p) != sig:
                 self.pending[p] = sig
                 continue
             self.pending.pop(p, None)
@@ -328,18 +490,38 @@ class OrganizzerApp(ctk.CTk):
     # ── lista de arquivos ──────────────────────────────────────────────────
     def _add_row(self, info):
         self.empty.pack_forget()
-        row = ctk.CTkFrame(self.scroll, fg_color=CARD, corner_radius=8, border_width=1, border_color=LINE_SOFT)
+        row = ctk.CTkFrame(
+            self.scroll, fg_color=CARD, corner_radius=8, border_width=1, border_color=LINE_SOFT
+        )
         row.pack(fill="x", padx=2, pady=2)
         row.grid_columnconfigure(0, weight=1)
         ctk.CTkCheckBox(
-            row, text=short(info["name"], 36), variable=info["var"], command=self._count,
-            checkbox_width=16, checkbox_height=16, corner_radius=4, fg_color=BLUE, hover_color=BLUE_DK,
-            border_color=BLUE_LT, text_color=DARK, font=F(11),
+            row,
+            text=short(info["name"], 36),
+            variable=info["var"],
+            command=self._count,
+            checkbox_width=16,
+            checkbox_height=16,
+            corner_radius=4,
+            fg_color=BLUE,
+            hover_color=BLUE_DK,
+            border_color=BLUE_LT,
+            text_color=DARK,
+            font=F(11),
         ).grid(row=0, column=0, padx=8, pady=4, sticky="w")
-        ctk.CTkLabel(row, text=size_str(info["size"]), font=F(9), text_color=FAINT).grid(row=0, column=1, padx=4)
-        btn(row, "✕", lambda i=info: self._remove(i), w=22, h=20, kind="link", text_color=RED, hover_color="#FEE2E2").grid(
-            row=0, column=2, padx=(0, 6)
+        ctk.CTkLabel(row, text=size_str(info["size"]), font=F(9), text_color=FAINT).grid(
+            row=0, column=1, padx=4
         )
+        btn(
+            row,
+            "✕",
+            lambda i=info: self._remove(i),
+            w=22,
+            h=20,
+            kind="link",
+            text_color=RED,
+            hover_color="#FEE2E2",
+        ).grid(row=0, column=2, padx=(0, 6))
         info["row"] = row
         self._count()
 
@@ -388,36 +570,37 @@ class OrganizzerApp(ctk.CTk):
         self._status("Lendo planilha...")
         self.update_idletasks()
         try:
-            wb = openpyxl.load_workbook(xl, data_only=True, read_only=True)
+            raw_rows = read_renovacao_rows(xl)
+        except KeyError as exc:
+            self._status("Aba 'RENOVAÇÃO' não encontrada.", "error")
+            return messagebox.showerror("Aba não encontrada", str(exc))
         except Exception as exc:
             self._status("Falha ao abrir a planilha.", "error")
             return messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{exc}")
-        if "RENOVAÇÃO" not in wb.sheetnames:
-            wb.close()
-            self._status("Aba 'RENOVAÇÃO' não encontrada.", "error")
-            return messagebox.showerror("Aba não encontrada", "A aba 'RENOVAÇÃO' não existe na planilha.")
 
         base, items, seen = xl.parent, [], set()
-        for row in wb["RENOVAÇÃO"].iter_rows(min_row=2, min_col=3, max_col=4, values_only=True):
-            loc, inq = clean(row[0]), clean(row[1] if len(row) > 1 else "")
+        for c_val, d_val in raw_rows:
+            loc, inq = clean(c_val), clean(d_val)
             if not loc and not inq:
                 continue
-            name = short(clean(f"{insurer} - {' x '.join(p for p in (loc, inq) if p)}"), 150).rstrip(". ")
+            name = short(
+                clean(f"{insurer} - {' x '.join(p for p in (loc, inq) if p)}"), 150
+            ).rstrip(". ")
             path = base / name
             if name not in seen:
                 try:
                     path.mkdir(parents=True, exist_ok=True)
                 except OSError as exc:
-                    wb.close()
                     self._status("Falha ao criar pastas.", "error")
                     return messagebox.showerror("Erro ao criar pasta", f"{name}\n\n{exc}")
                 seen.add(name)
             items.append({"name": name, "path": path, "status": "pendente"})
-        wb.close()
 
         if not items:
             self._status("Nenhum registro nas colunas C e D.", "warn")
-            return messagebox.showinfo("Sem registros", "Nada encontrado a partir da linha 2 (colunas C e D).")
+            return messagebox.showinfo(
+                "Sem registros", "Nada encontrado a partir da linha 2 (colunas C e D)."
+            )
 
         self.queue, self.idx, self.running = items, 0, True
         self._clear()
@@ -519,7 +702,7 @@ class OrganizzerApp(ctk.CTk):
                 self._status(f"Falha ao mover {src.name}: {exc}", "error")
         self._after_change()
         if failed:
-            return  # mantém o item atual para resolver as falhas
+            return
 
         item["status"] = "concluido"
         self.idx += 1
@@ -527,7 +710,9 @@ class OrganizzerApp(ctk.CTk):
         self.next_btn.configure(text="✓  Movido!", fg_color=GREEN, hover_color=GREEN)
         self.after(
             400,
-            lambda: self.next_btn.configure(text="Recortar e próximo  →", fg_color=BLUE, hover_color=BLUE_DK),
+            lambda: self.next_btn.configure(
+                text="Recortar e próximo  →", fg_color=BLUE, hover_color=BLUE_DK
+            ),
         )
         self._status(f"{moved} arquivo(s) movido(s) para '{short(item['name'], 50)}'.", "ok")
         if self.idx >= len(self.queue) and not self.cfg_open:
