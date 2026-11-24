@@ -352,11 +352,12 @@ class OrganizzerApp(ctk.CTk):
         fh.grid_columnconfigure(0, weight=1)
         self.files_title = ctk.CTkLabel(fh, text="ARQUIVOS", font=F(10, "bold"), text_color=MUTED)
         self.files_title.grid(row=0, column=0, sticky="w")
-        btn(fh, "Todos", lambda: self._check_all(True), w=44, h=20, kind="link").grid(row=0, column=1)
+        btn(fh, "↻", lambda: self._poll(force_now=True), w=28, h=20, kind="link").grid(row=0, column=1)
+        btn(fh, "Todos", lambda: self._check_all(True), w=44, h=20, kind="link").grid(row=0, column=2)
         btn(fh, "Nenhum", lambda: self._check_all(False), w=50, h=20, kind="link").grid(
-            row=0, column=2
+            row=0, column=3
         )
-        btn(fh, "Limpar", self._clear, w=46, h=20, kind="link").grid(row=0, column=3)
+        btn(fh, "Limpar", self._clear, w=46, h=20, kind="link").grid(row=0, column=4)
 
         self.scroll = ctk.CTkScrollableFrame(
             work, fg_color=BG, corner_radius=10, border_width=1, border_color=LINE_SOFT
@@ -442,7 +443,7 @@ class OrganizzerApp(ctk.CTk):
             self._save_prefs()
 
     # ── monitoramento da pasta ─────────────────────────────────────────────
-    def _scan(self):
+def _scan(self):
         src = Path(self.source_var.get().strip())
         out = []
         if not src.is_dir():
@@ -458,7 +459,8 @@ class OrganizzerApp(ctk.CTk):
                         and e.suffix.lower() not in TEMP_EXTS
                     ):
                         s = e.stat()
-                        out.append((s.st_mtime, s.st_size, e))
+                        if s.st_size > 0:
+                            out.append((s.st_mtime, s.st_size, e))
                 except OSError:
                     continue
         except OSError:
@@ -469,23 +471,39 @@ class OrganizzerApp(ctk.CTk):
         self.known = {str(e.resolve()): (m, s) for m, s, e in self._scan()}
         self.pending.clear()
 
-    def _poll(self):
+    def _poll(self, force_now: bool = False):
+        scanned = self._scan()
+        current_paths = {str(e.resolve()) for _, _, e in scanned}
+
+        # Remove da lista arquivos que não existem mais na pasta de origem
+        for f in list(self.files):
+            if f["path"] not in current_paths or not Path(f["path"]).exists():
+                self._drop(f)
+        self._after_change()
+
         have = {f["path"] for f in self.files}
-        for mtime, size, e in self._scan():
+        for mtime, size, e in scanned:
             p, sig = str(e.resolve()), (mtime, size)
-            if self.known.get(p) == sig:
+            if p in have:
                 continue
-            if self.pending.get(p) != sig:
-                self.pending[p] = sig
-                continue
+
+            # Se já estava pendente com a mesma assinatura ou se for atualização forçada, adiciona
+            prev_pending = self.pending.get(p)
+            if not force_now and prev_pending != sig and prev_pending is not None:
+                # Se ainda está crescendo, atualiza pendente e aguarda próximo ciclo
+                if prev_pending[1] != size:
+                    self.pending[p] = sig
+                    continue
+
             self.pending.pop(p, None)
             self.known[p] = sig
-            if p not in have:
-                info = {"path": p, "name": e.name, "size": size, "var": ctk.BooleanVar(value=True)}
-                self.files.append(info)
-                self._add_row(info)
-                have.add(p)
-        self.after(1200, self._poll)
+            info = {"path": p, "name": e.name, "size": size, "var": ctk.BooleanVar(value=True)}
+            self.files.append(info)
+            self._add_row(info)
+            have.add(p)
+
+        if not force_now:
+            self.after(1000, self._poll)
 
     # ── lista de arquivos ──────────────────────────────────────────────────
     def _add_row(self, info):
