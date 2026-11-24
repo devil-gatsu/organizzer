@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import openpyxl
 
-APP_NAME = "Organizzer"
+APP_NAME = "organizzer"
 STATE_FILE = Path.home() / ".organizzer_state.json"
 TEMP_EXTS = {".tmp", ".crdownload", ".part", ".download"}
 IGNORED = {"desktop.ini", "thumbs.db"}
@@ -51,6 +51,16 @@ def size_str(n: float) -> str:
             return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
         n /= 1024
     return ""
+
+
+def build_target_name(base_name: str, raw_ticket: str) -> str:
+    tkt = clean(raw_ticket)
+    if tkt:
+        tkt = re.sub(r"^(?:tkt|ticket)\s*[:#\-]?\s*", "", tkt, flags=re.IGNORECASE).strip()
+    if not tkt:
+        return short(base_name, 150).rstrip(". ")
+    combined = clean(f"TKT {tkt} {base_name}")
+    return short(combined, 150).rstrip(". ")
 
 
 def read_renovacao_rows(xl_path: Path):
@@ -172,14 +182,17 @@ class OrganizzerApp(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("light")
         self.title(APP_NAME)
-        self.geometry("500x540")
-        self.minsize(460, 480)
+        self.geometry("500x565")
+        self.minsize(460, 505)
         self.configure(fg_color=BG)
 
         self.insurer_var = ctk.StringVar()
         self.excel_var = ctk.StringVar()
         self.source_var = ctk.StringVar(value=str(Path.home() / "Downloads"))
+        self.ticket_var = ctk.StringVar()
+        self.ticket_var.trace_add("write", lambda *_: self._refresh_preview())
 
+        self.base_dir = None
         self.queue = []
         self.idx = 0
         self.running = False
@@ -332,7 +345,33 @@ class OrganizzerApp(ctk.CTk):
         )
         self.cur_label.grid(row=1, column=0, padx=10, sticky="w")
         self.next_label = ctk.CTkLabel(ban, text="", font=F(10), text_color=MUTED, anchor="w")
-        self.next_label.grid(row=2, column=0, padx=10, pady=(0, 5), sticky="w")
+        self.next_label.grid(row=2, column=0, padx=10, pady=(0, 4), sticky="w")
+
+        tkt_row = ctk.CTkFrame(ban, fg_color="transparent")
+        tkt_row.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 6), sticky="ew")
+        tkt_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            tkt_row, text="Ticket (opcional)", font=F(10, "bold"), text_color=BLUE
+        ).grid(row=0, column=0, padx=(0, 6), sticky="w")
+        self.ticket_entry = ctk.CTkEntry(
+            tkt_row,
+            textvariable=self.ticket_var,
+            placeholder_text="Ex.: 987654",
+            width=110,
+            height=24,
+            corner_radius=7,
+            fg_color=CARD,
+            border_color=LINE,
+            text_color=DARK,
+            placeholder_text_color=FAINT,
+            font=F(10),
+        )
+        self.ticket_entry.grid(row=0, column=1, padx=(0, 8), sticky="w")
+        self.preview_label = ctk.CTkLabel(
+            tkt_row, text="", font=F(10), text_color=MUTED, anchor="e"
+        )
+        self.preview_label.grid(row=0, column=2, sticky="e")
+
         bb = ctk.CTkFrame(ban, fg_color="transparent")
         bb.grid(row=0, column=1, rowspan=3, padx=8)
         self.copy_btn = btn(bb, "Copiar", self._copy_name, w=56, h=24, kind="ghost")
@@ -598,18 +637,18 @@ class OrganizzerApp(ctk.CTk):
             loc, inq = clean(c_val), clean(d_val)
             if not loc and not inq:
                 continue
-            name = short(
+            base_name = short(
                 clean(f"{insurer} - {' x '.join(p for p in (loc, inq) if p)}"), 150
             ).rstrip(". ")
-            path = base / name
-            if name not in seen:
+            path = base / base_name
+            if base_name not in seen:
                 try:
                     path.mkdir(parents=True, exist_ok=True)
                 except OSError as exc:
                     self._status("Falha ao criar pastas.", "error")
-                    return messagebox.showerror("Erro ao criar pasta", f"{name}\n\n{exc}")
-                seen.add(name)
-            items.append({"name": name, "path": path, "status": "pendente"})
+                    return messagebox.showerror("Erro ao criar pasta", f"{base_name}\n\n{exc}")
+                seen.add(base_name)
+            items.append({"base_name": base_name, "name": base_name, "path": path, "status": "pendente"})
 
         if not items:
             self._status("Nenhum registro nas colunas C e D.", "warn")
@@ -617,7 +656,9 @@ class OrganizzerApp(ctk.CTk):
                 "Sem registros", "Nada encontrado a partir da linha 2 (colunas C e D)."
             )
 
+        self.base_dir = base
         self.queue, self.idx, self.running = items, 0, True
+        self.ticket_var.set("")
         self._clear()
         self._snapshot()
         self._save_prefs()
@@ -626,11 +667,62 @@ class OrganizzerApp(ctk.CTk):
         self._refresh()
         self._status(f"{len(items)} pastas prontas em: {base}", "ok")
 
+    def _active_target_name(self) -> str:
+        item = self._current()
+        if not item:
+            return ""
+        return build_target_name(item["base_name"], self.ticket_var.get())
+
+    def _refresh_preview(self):
+        item = self._current()
+        if not item:
+            self.preview_label.configure(text="")
+            return
+        tkt = clean(self.ticket_var.get())
+        if tkt:
+            final_name = build_target_name(item["base_name"], tkt)
+            self.preview_label.configure(text=short(f"→ {final_name}", 42), text_color=BLUE)
+        else:
+            self.preview_label.configure(text="", text_color=MUTED)
+
+    def _resolve_dest_folder(self, item: dict) -> Path:
+        base = self.base_dir or item["path"].parent
+        final_name = build_target_name(item["base_name"], self.ticket_var.get())
+        final_path = base / final_name
+        old_path = item["path"]
+
+        if final_path != old_path and old_path.exists():
+            if not final_path.exists():
+                old_path.rename(final_path)
+            else:
+                final_path.mkdir(parents=True, exist_ok=True)
+                for child in list(old_path.iterdir()):
+                    if child.is_file():
+                        dst_child = final_path / child.name
+                        if dst_child.exists():
+                            dst_child = (
+                                final_path
+                                / f"{child.stem}_{datetime.now():%Y%m%d_%H%M%S}{child.suffix}"
+                            )
+                        shutil.move(str(child), str(dst_child))
+                try:
+                    if not any(old_path.iterdir()):
+                        old_path.rmdir()
+                except OSError:
+                    pass
+        else:
+            final_path.mkdir(parents=True, exist_ok=True)
+
+        item["name"] = final_name
+        item["path"] = final_path
+        return final_path
+
     def _refresh(self):
         total = len(self.queue)
         active = self.running and self.idx < total
         for b in (self.next_btn, self.skip_btn, self.copy_btn, self.open_btn):
             b.configure(state="normal" if active else "disabled")
+        self.ticket_entry.configure(state="normal" if active else "disabled")
         self.back_btn.configure(state="normal" if self.running and self.idx > 0 else "disabled")
 
         if not self.running or not total:
@@ -638,43 +730,49 @@ class OrganizzerApp(ctk.CTk):
             self.bar.set(0)
             self.cur_label.configure(text="Nenhum lote iniciado")
             self.next_label.configure(text="")
+            self.preview_label.configure(text="")
         elif self.idx >= total:
             done = sum(1 for i in self.queue if i["status"] == "concluido")
             self.counter.configure(text=f"{total} / {total}")
             self.bar.set(1)
             self.cur_label.configure(text="Lote concluído!")
             self.next_label.configure(text=f"{done} concluído(s), {total - done} pendente(s)")
+            self.preview_label.configure(text="")
             self._status("Fila finalizada.", "ok")
         else:
             self.counter.configure(text=f"{self.idx + 1:02d} / {total:02d}")
             self.bar.set(self.idx / total)
-            self.cur_label.configure(text=self.queue[self.idx]["name"])
-            nxt = self.queue[self.idx + 1]["name"] if self.idx + 1 < total else None
+            self.cur_label.configure(text=self.queue[self.idx]["base_name"])
+            nxt = self.queue[self.idx + 1]["base_name"] if self.idx + 1 < total else None
             self.next_label.configure(text=short(f"Próxima: {nxt}", 60) if nxt else "Última da fila")
+            self._refresh_preview()
 
     def _current(self):
         return self.queue[self.idx] if self.running and self.idx < len(self.queue) else None
 
     def _copy_name(self):
-        if item := self._current():
+        if self._current():
+            name = self._active_target_name()
             self.clipboard_clear()
-            self.clipboard_append(item["name"])
-            self._status(f"Copiado: {short(item['name'], 60)}", "ok")
+            self.clipboard_append(name)
+            self._status(f"Copiado: {short(name, 60)}", "ok")
 
     def _open_folder(self):
         item = self._current()
         if not item:
             return
         try:
+            dest = self._resolve_dest_folder(item)
             if hasattr(os, "startfile"):
-                os.startfile(str(item["path"]))
+                os.startfile(str(dest))
             else:
-                subprocess.Popen(["xdg-open", str(item["path"])])
+                subprocess.Popen(["xdg-open", str(dest)])
         except Exception as exc:
             self._status(f"Não foi possível abrir a pasta: {exc}", "error")
 
     def _back(self):
         if self.running and self.idx > 0:
+            self.ticket_var.set("")
             self.idx -= 1
             self.queue[self.idx]["status"] = "pendente"
             self._refresh()
@@ -682,6 +780,7 @@ class OrganizzerApp(ctk.CTk):
 
     def _skip(self):
         if self._current():
+            self.ticket_var.set("")
             self.queue[self.idx]["status"] = "pendente"
             self.idx += 1
             self._refresh()
@@ -697,16 +796,21 @@ class OrganizzerApp(ctk.CTk):
         ):
             return
 
-        item["path"].mkdir(parents=True, exist_ok=True)
+        try:
+            dest_folder = self._resolve_dest_folder(item)
+        except OSError as exc:
+            self._status(f"Falha ao preparar pasta com ticket: {exc}", "error")
+            return messagebox.showerror("Erro de pasta", str(exc))
+
         moved = failed = 0
         for f in selected:
             src = Path(f["path"])
             if not src.exists():
                 self._drop(f)
                 continue
-            dst = item["path"] / src.name
+            dst = dest_folder / src.name
             if dst.exists():
-                dst = item["path"] / f"{src.stem}_{datetime.now():%Y%m%d_%H%M%S}{src.suffix}"
+                dst = dest_folder / f"{src.stem}_{datetime.now():%Y%m%d_%H%M%S}{src.suffix}"
             try:
                 shutil.move(str(src), str(dst))
                 self.known.pop(str(src.resolve()), None)
@@ -720,6 +824,7 @@ class OrganizzerApp(ctk.CTk):
             return
 
         item["status"] = "concluido"
+        self.ticket_var.set("")
         self.idx += 1
         self._refresh()
         self.next_btn.configure(text="✓  Movido!", fg_color=GREEN, hover_color=GREEN)
